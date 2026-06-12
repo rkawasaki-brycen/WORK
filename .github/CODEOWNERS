@@ -1,0 +1,19 @@
+# CODEOWNERS — コードオーナー設定
+# 形式: <pattern> <owner> [<owner> ...]
+# オーナーが設定されたパスのPRは自動的にレビュー依頼される
+
+# デフォルト: 全ファイルにレビュー必要
+* @your-org/dev-team
+
+# ドキュメント
+/docs/ @your-org/tech-leads
+
+# セキュリティ関連
+/docs/isms/ @your-org/security-team
+/.github/ @your-org/tech-leads
+
+# CI/CD
+/.github/workflows/ @your-org/devops-team
+
+# AI Governance
+/docs/ai-governance/ @your-org/tech-leads @your-org/security-team

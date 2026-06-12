@@ -1,0 +1,285 @@
+name: Dependency Scan
+
+on:
+  schedule:
+    # Runs every Sunday at 06:00 UTC
+    - cron: "0 6 * * 0"
+  push:
+    paths:
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  security-events: write
+
+jobs:
+  npm-audit:
+    name: npm Audit
+    runs-on: ubuntu-latest
+    outputs:
+      critical_count: ${{ steps.audit.outputs.critical_count }}
+      high_count: ${{ steps.audit.outputs.high_count }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit (JSON output)
+        id: audit
+        run: |
+          set +e
+          npm audit --json > npm-audit-report.json 2>&1
+          AUDIT_EXIT=$?
+          set -e
+
+          # Parse critical and high counts from JSON report
+          CRITICAL=$(jq '.metadata.vulnerabilities.critical // 0' npm-audit-report.json)
+          HIGH=$(jq '.metadata.vulnerabilities.high // 0' npm-audit-report.json)
+          MODERATE=$(jq '.metadata.vulnerabilities.moderate // 0' npm-audit-report.json)
+          LOW=$(jq '.metadata.vulnerabilities.low // 0' npm-audit-report.json)
+          TOTAL=$(jq '.metadata.vulnerabilities.total // 0' npm-audit-report.json)
+
+          echo "critical_count=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high_count=$HIGH"         >> $GITHUB_OUTPUT
+
+          echo "## npm Audit Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Critical | $CRITICAL |" >> $GITHUB_STEP_SUMMARY
+          echo "| High     | $HIGH |" >> $GITHUB_STEP_SUMMARY
+          echo "| Moderate | $MODERATE |" >> $GITHUB_STEP_SUMMARY
+          echo "| Low      | $LOW |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total**| **$TOTAL** |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            echo "::warning::Found $CRITICAL critical and $HIGH high severity vulnerabilities"
+          fi
+
+          # Only fail on critical vulnerabilities in CI
+          if [ "$CRITICAL" -gt 0 ]; then
+            exit 1
+          fi
+        continue-on-error: true
+
+      - name: Upload npm audit report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit-report-${{ github.run_id }}
+          path: npm-audit-report.json
+          retention-days: 30
+
+  owasp-dependency-check:
+    name: OWASP Dependency Check
+    runs-on: ubuntu-latest
+    outputs:
+      critical_found: ${{ steps.parse.outputs.critical_found }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache OWASP NVD database
+        uses: actions/cache@v4
+        with:
+          path: ~/.dependency-check/data
+          key: owasp-nvd-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            owasp-nvd-${{ runner.os }}-
+
+      - name: Run OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        id: owasp
+        with:
+          project: "${{ github.repository }}"
+          path: "."
+          format: "ALL"
+          out: "owasp-reports"
+          args: >
+            --enableRetired
+            --enableExperimental
+            --nodeAuditSkipDevDependencies
+            --failOnCVSS 7
+            --suppression suppression.xml
+        continue-on-error: true
+
+      - name: Parse OWASP results for critical findings
+        id: parse
+        run: |
+          CRITICAL_FOUND="false"
+          if [ -f "owasp-reports/dependency-check-report.json" ]; then
+            CRITICAL_COUNT=$(jq '[.dependencies[].vulnerabilities[]? | select(.severity == "CRITICAL")] | length' owasp-reports/dependency-check-report.json 2>/dev/null || echo 0)
+            if [ "$CRITICAL_COUNT" -gt 0 ]; then
+              CRITICAL_FOUND="true"
+              echo "::error::OWASP Dependency Check found $CRITICAL_COUNT critical vulnerabilities"
+            fi
+          fi
+          echo "critical_found=$CRITICAL_FOUND" >> $GITHUB_OUTPUT
+
+      - name: Upload OWASP reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: owasp-dependency-check-report-${{ github.run_id }}
+          path: owasp-reports/
+          retention-days: 30
+
+      - name: Publish OWASP results to Security tab (SARIF)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('owasp-reports/dependency-check-report.sarif') != ''
+        with:
+          sarif_file: owasp-reports/dependency-check-report.sarif
+          category: owasp-dependency-check
+
+  create-issue:
+    name: Create GitHub Issue on Critical Findings
+    runs-on: ubuntu-latest
+    needs: [npm-audit, owasp-dependency-check]
+    if: |
+      always() &&
+      (needs.npm-audit.outputs.critical_count > 0 ||
+       needs.owasp-dependency-check.outputs.critical_found == 'true')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for existing open vulnerability issue
+        id: find-issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh issue list \
+            --label "security,dependencies" \
+            --state open \
+            --json number \
+            --jq '.[0].number' 2>/dev/null || echo "")
+          echo "existing_issue=$EXISTING" >> $GITHUB_OUTPUT
+
+      - name: Create or update vulnerability issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY="## Critical Dependency Vulnerabilities Detected
+
+          **Workflow run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          **Branch/ref:** \`${{ github.ref_name }}\`
+          **Triggered by:** ${{ github.event_name }}
+          **Date:** $(date -u '+%Y-%m-%d %H:%M UTC')
+
+          ### Findings
+
+          | Scanner | Critical | High |
+          |---------|----------|------|
+          | npm audit | ${{ needs.npm-audit.outputs.critical_count }} | ${{ needs.npm-audit.outputs.high_count }} |
+          | OWASP DC | ${{ needs.owasp-dependency-check.outputs.critical_found == 'true' && 'Yes' || '0' }} | — |
+
+          ### Action Required
+
+          1. Download the full reports from the workflow artifacts.
+          2. Review each critical vulnerability and determine a remediation path.
+          3. Run \`npm audit fix\` or manually update affected packages.
+          4. Close this issue once all critical findings are resolved.
+
+          > This issue was automatically generated by the Dependency Scan workflow.
+          "
+
+          if [ -n "${{ steps.find-issue.outputs.existing_issue }}" ]; then
+            gh issue comment "${{ steps.find-issue.outputs.existing_issue }}" \
+              --body "$BODY"
+            echo "Updated existing issue #${{ steps.find-issue.outputs.existing_issue }}"
+          else
+            gh issue create \
+              --title "Critical dependency vulnerabilities detected ($(date -u '+%Y-%m-%d'))" \
+              --body "$BODY" \
+              --label "security,dependencies" \
+              --assignee "@me"
+          fi
+
+  notify-teams:
+    name: Notify Microsoft Teams
+    runs-on: ubuntu-latest
+    needs: [npm-audit, owasp-dependency-check]
+    if: |
+      always() &&
+      (needs.npm-audit.outputs.critical_count > 0 ||
+       needs.owasp-dependency-check.outputs.critical_found == 'true')
+    steps:
+      - name: Send Teams notification
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          REPO="${{ github.repository }}"
+          RUN_URL="${{ github.server_url }}/$REPO/actions/runs/${{ github.run_id }}"
+          CRITICAL_NPM="${{ needs.npm-audit.outputs.critical_count }}"
+          HIGH_NPM="${{ needs.npm-audit.outputs.high_count }}"
+          OWASP_CRITICAL="${{ needs.owasp-dependency-check.outputs.critical_found }}"
+          DATE=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+          PAYLOAD=$(cat <<EOF
+          {
+            "@type": "MessageCard",
+            "@context": "https://schema.org/extensions",
+            "themeColor": "FF0000",
+            "summary": "Critical dependency vulnerabilities detected in $REPO",
+            "sections": [
+              {
+                "activityTitle": "Critical Dependency Vulnerabilities Detected",
+                "activitySubtitle": "$REPO",
+                "activityImage": "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
+                "facts": [
+                  { "name": "Repository",      "value": "$REPO" },
+                  { "name": "Branch",          "value": "${{ github.ref_name }}" },
+                  { "name": "npm audit (Critical / High)", "value": "$CRITICAL_NPM / $HIGH_NPM" },
+                  { "name": "OWASP Critical",  "value": "$OWASP_CRITICAL" },
+                  { "name": "Scan date",       "value": "$DATE" }
+                ],
+                "markdown": true
+              }
+            ],
+            "potentialAction": [
+              {
+                "@type": "OpenUri",
+                "name": "View Workflow Run",
+                "targets": [
+                  { "os": "default", "uri": "$RUN_URL" }
+                ]
+              }
+            ]
+          }
+          EOF
+          )
+
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$TEAMS_WEBHOOK_URL")
+
+          if [ "$HTTP_STATUS" -ne 200 ] && [ "$HTTP_STATUS" -ne 202 ]; then
+            echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
+          else
+            echo "Teams notification sent successfully (HTTP $HTTP_STATUS)"
+          fi
