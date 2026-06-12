@@ -25,4 +25,4 @@ assignees: ''
 - インシデント管理手順実施済み: [ ] Yes [ ] No
 
 ## 参考
-- [ISMS インシデント管理](../docs/isms/incident-management.md)
+- [ISMS インシデント管理](/docs/isms/incident-management.md)

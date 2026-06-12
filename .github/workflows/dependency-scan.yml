@@ -20,9 +20,26 @@ permissions:
   security-events: write
 
 jobs:
+  # テンプレートリポジトリ対応: package.json が存在しない間は
+  # npm 前提のジョブを skip し、プロジェクト適用時に自動で有効化される
+  check-project:
+    name: Check Project Type
+    runs-on: ubuntu-latest
+    outputs:
+      has-package: ${{ steps.check.outputs.exists }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for package.json
+        id: check
+        run: echo "exists=$([ -f package.json ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
   npm-audit:
     name: npm Audit
     runs-on: ubuntu-latest
+    needs: check-project
+    if: needs.check-project.outputs.has-package == 'true'
     outputs:
       critical_count: ${{ steps.audit.outputs.critical_count }}
       high_count: ${{ steps.audit.outputs.high_count }}
@@ -88,6 +105,8 @@ jobs:
   owasp-dependency-check:
     name: OWASP Dependency Check
     runs-on: ubuntu-latest
+    needs: check-project
+    if: needs.check-project.outputs.has-package == 'true'
     outputs:
       critical_found: ${{ steps.parse.outputs.critical_found }}
     steps:
@@ -228,6 +247,8 @@ jobs:
       (needs.npm-audit.outputs.critical_count > 0 ||
        needs.owasp-dependency-check.outputs.critical_found == 'true')
     steps:
+      # Power Automate Workflows 用の Adaptive Card 形式
+      # （O365 Connector の MessageCard 形式は廃止済みのため使用しない）
       - name: Send Teams notification
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
@@ -241,32 +262,42 @@ jobs:
 
           PAYLOAD=$(cat <<EOF
           {
-            "@type": "MessageCard",
-            "@context": "https://schema.org/extensions",
-            "themeColor": "FF0000",
-            "summary": "Critical dependency vulnerabilities detected in $REPO",
-            "sections": [
+            "type": "message",
+            "attachments": [
               {
-                "activityTitle": "Critical Dependency Vulnerabilities Detected",
-                "activitySubtitle": "$REPO",
-                "activityImage": "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
-                "facts": [
-                  { "name": "Repository",      "value": "$REPO" },
-                  { "name": "Branch",          "value": "${{ github.ref_name }}" },
-                  { "name": "npm audit (Critical / High)", "value": "$CRITICAL_NPM / $HIGH_NPM" },
-                  { "name": "OWASP Critical",  "value": "$OWASP_CRITICAL" },
-                  { "name": "Scan date",       "value": "$DATE" }
-                ],
-                "markdown": true
-              }
-            ],
-            "potentialAction": [
-              {
-                "@type": "OpenUri",
-                "name": "View Workflow Run",
-                "targets": [
-                  { "os": "default", "uri": "$RUN_URL" }
-                ]
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    {
+                      "type": "TextBlock",
+                      "text": "Critical Dependency Vulnerabilities Detected",
+                      "weight": "Bolder",
+                      "size": "Medium",
+                      "color": "Attention",
+                      "wrap": true
+                    },
+                    {
+                      "type": "FactSet",
+                      "facts": [
+                        { "title": "Repository",      "value": "$REPO" },
+                        { "title": "Branch",          "value": "${{ github.ref_name }}" },
+                        { "title": "npm audit (Critical / High)", "value": "$CRITICAL_NPM / $HIGH_NPM" },
+                        { "title": "OWASP Critical",  "value": "$OWASP_CRITICAL" },
+                        { "title": "Scan date",       "value": "$DATE" }
+                      ]
+                    }
+                  ],
+                  "actions": [
+                    {
+                      "type": "Action.OpenUrl",
+                      "title": "View Workflow Run",
+                      "url": "$RUN_URL"
+                    }
+                  ]
+                }
               }
             ]
           }

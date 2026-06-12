@@ -40,6 +40,19 @@
 | [docs/audit/](docs/audit/) | 内部監査チェックリスト |
 | [docs/management/](docs/management/) | 経営層・PM・開発者向け資料 |
 
+## 初期セットアップ（リポジトリ管理者向け）
+
+このスケルトンを新しいリポジトリへ適用したら、最初に運用ラベルを作成してください。
+Issue テンプレートおよび Dependency Scan ワークフローの自動 Issue 起票は、これらのラベルの存在を前提としています。
+
+```bash
+./scripts/setup-labels.sh
+```
+
+> **Note**: CI / Security Scan / Dependency Scan / SBOM の各ワークフローは、
+> リポジトリに `package.json` が存在しない間は自動的に skip されます。
+> プロジェクトのコードと `package.json` を配置した時点で有効化されます。
+
 ## クイックスタート
 
 新メンバーは [docs/onboarding/day-one-guide.md](docs/onboarding/day-one-guide.md) から始めてください。

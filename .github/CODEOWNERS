@@ -1,19 +1,22 @@
 # CODEOWNERS — コードオーナー設定
 # 形式: <pattern> <owner> [<owner> ...]
 # オーナーが設定されたパスのPRは自動的にレビュー依頼される
+#
+# 注意: チーム指定 (@org/team-name) は GitHub Organization 配下のリポジトリ
+# でのみ機能する。Organization へ移管した際はチーム指定へ更新すること。
 
 # デフォルト: 全ファイルにレビュー必要
-* @your-org/dev-team
+* @rkawasaki-brycen
 
 # ドキュメント
-/docs/ @your-org/tech-leads
+/docs/ @rkawasaki-brycen
 
 # セキュリティ関連
-/docs/isms/ @your-org/security-team
-/.github/ @your-org/tech-leads
+/docs/isms/ @rkawasaki-brycen
+/.github/ @rkawasaki-brycen
 
 # CI/CD
-/.github/workflows/ @your-org/devops-team
+/.github/workflows/ @rkawasaki-brycen
 
 # AI Governance
-/docs/ai-governance/ @your-org/tech-leads @your-org/security-team
+/docs/ai-governance/ @rkawasaki-brycen
